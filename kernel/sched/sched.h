@@ -85,6 +85,7 @@ struct load_subtractions {
 #define NUM_TRACKED_WINDOWS 2
 #define NUM_LOAD_INDICES 1000
 
+#endif /* CONFIG_SCHED_WALT */   
 struct sched_cluster {
 	raw_spinlock_t load_lock;
 	struct list_head list;
@@ -116,7 +117,6 @@ struct sched_cluster {
 extern unsigned int sched_disable_window_stats;
 
 extern struct timer_list sched_grp_timer;
-#endif /* CONFIG_SCHED_WALT */
 
 /* task_struct::on_rq states: */
 #define TASK_ON_RQ_QUEUED	1
