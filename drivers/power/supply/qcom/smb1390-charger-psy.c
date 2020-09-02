@@ -878,6 +878,9 @@ static int smb1390_disable_vote_cb(struct votable *votable, void *data,
 		return rc;
 	}
 
+	smb1390_dbg(chip, PR_INFO, "client: %s, master: %s\n",
+			client, (disable ? "disabled" : "enabled"));
+
 	/* charging may have been disabled by ILIM; send uevent */
 	if (chip->cp_master_psy && (disable != chip->disabled))
 		power_supply_changed(chip->cp_master_psy);
@@ -899,6 +902,9 @@ static int smb1390_slave_disable_vote_cb(struct votable *votable, void *data,
 				disable ? "disable" : "enable", rc);
 		return rc;
 	}
+
+	smb1390_dbg(chip, PR_INFO, "client: %s, slave: %s\n",
+			client, (disable ? "disabled" : "enabled"));
 
 	/* Re-distribute ILIM to Master CP when Slave is disabled */
 	if (disable && (chip->ilim_votable)) {
@@ -980,7 +986,7 @@ static int smb1390_ilim_vote_cb(struct votable *votable, void *data,
 			return rc;
 		}
 
-		smb1390_dbg(chip, PR_INFO, "ILIM set to %duA slave_enabled%d\n",
+		smb1390_dbg(chip, PR_INFO, "ILIM set to %duA slave_enabled = %d\n",
 						ilim_uA, slave_enabled);
 		vote(chip->disable_votable, ILIM_VOTER, false, 0);
 	}
@@ -1067,12 +1073,22 @@ static void smb1390_configure_ilim(struct smb1390 *chip, int mode)
 	/* QC3.0/Wireless adapter rely on the settled AICL for USBMID_USBMID */
 	if ((chip->pl_input_mode == POWER_SUPPLY_PL_USBMID_USBMID)
 			&& (mode == POWER_SUPPLY_CP_HVDCP3)) {
+		if (!chip->fcc_main_votable)
+			chip->fcc_main_votable = find_votable("FCC_MAIN");
+
 		rc = power_supply_get_property(chip->usb_psy,
 				POWER_SUPPLY_PROP_INPUT_CURRENT_SETTLED, &pval);
-		if (rc < 0)
+		if (rc < 0) {
 			pr_err("Couldn't get usb aicl rc=%d\n", rc);
-		else
+		} else {
 			vote(chip->ilim_votable, ICL_VOTER, true, pval.intval);
+			/*
+			 * Rerun FCC votable to ensure offset for ILIM
+			 * compensation is recalculated based on new ILIM.
+			 */
+			if (chip->fcc_main_votable)
+				rerun_election(chip->fcc_main_votable);
+		}
 	}
 }
 
@@ -1086,9 +1102,13 @@ static void smb1390_status_change_work(struct work_struct *work)
 	if (!is_psy_voter_available(chip))
 		goto out;
 
-	if (!smb1390_is_adapter_cc_mode(chip))
-		vote(chip->disable_votable, SOC_LEVEL_VOTER,
-		     smb1390_is_batt_soc_valid(chip) ? false : true, 0);
+	/*
+	 * If batt soc is not valid upon bootup, but becomes
+	 * valid due to the battery discharging later, remove
+	 * vote from SOC_LEVEL_VOTER.
+	 */
+	if (smb1390_is_batt_soc_valid(chip))
+		vote(chip->disable_votable, SOC_LEVEL_VOTER, false, 0);
 
 	rc = power_supply_get_property(chip->usb_psy,
 			POWER_SUPPLY_PROP_SMB_EN_MODE, &pval);
@@ -1104,6 +1124,12 @@ static void smb1390_status_change_work(struct work_struct *work)
 			pr_err("Couldn't get cp reason rc=%d\n", rc);
 			goto out;
 		}
+
+		/*
+		 * Slave SMB1390 is not required for the power-rating of QC3
+		 */
+		if (pval.intval != POWER_SUPPLY_CP_HVDCP3)
+			vote(chip->slave_disable_votable, SRC_VOTER, false, 0);
 
 		/* Check for SOC threshold only once before enabling CP */
 		vote(chip->disable_votable, SRC_VOTER, false, 0);
@@ -1162,6 +1188,7 @@ static void smb1390_status_change_work(struct work_struct *work)
 		}
 	} else {
 		chip->batt_soc_validated = false;
+		vote(chip->slave_disable_votable, SRC_VOTER, true, 0);
 		vote(chip->disable_votable, SRC_VOTER, true, 0);
 		vote(chip->disable_votable, TAPER_END_VOTER, false, 0);
 		vote(chip->fcc_votable, CP_VOTER, false, 0);
@@ -1196,11 +1223,14 @@ static int smb1390_validate_slave_chg_taper(struct smb1390 *chip, int fcc_uA)
 		smb1390_dbg(chip, PR_INFO, "Set Master ILIM to MAX, post Slave disable in taper, fcc=%d\n",
 									fcc_uA);
 		vote_override(chip->ilim_votable, CC_MODE_VOTER,
-						true, MAX_ILIM_DUAL_CP_UA);
+				smb1390_is_adapter_cc_mode(chip),
+				MAX_ILIM_DUAL_CP_UA);
+
 		if (chip->usb_icl_votable)
 			vote_override(chip->usb_icl_votable,
 				      TAPER_MAIN_ICL_LIMIT_VOTER,
-				      true, chip->cc_mode_taper_main_icl_ua);
+				      smb1390_is_adapter_cc_mode(chip),
+				      chip->cc_mode_taper_main_icl_ua);
 	}
 
 	return rc;
@@ -1480,7 +1510,7 @@ static int smb1390_set_prop(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_CP_ILIM:
 		if (chip->ilim_votable)
 			vote_override(chip->ilim_votable, CC_MODE_VOTER,
-							true, val->intval);
+					(val->intval > 0), val->intval);
 		break;
 	default:
 		smb1390_dbg(chip, PR_MISC, "charge pump power supply set prop %d not supported\n",
@@ -1581,8 +1611,7 @@ static int smb1390_parse_dt(struct smb1390 *chip)
 	of_property_read_u32(chip->dev->of_node, "qcom,parallel-input-mode",
 			&chip->pl_input_mode);
 
-	chip->cp_slave_thr_taper_ua = smb1390_is_adapter_cc_mode(chip) ?
-			(3 * chip->min_ilim_ua) : (4 * chip->min_ilim_ua);
+	chip->cp_slave_thr_taper_ua = 3 * chip->min_ilim_ua;
 	of_property_read_u32(chip->dev->of_node, "qcom,cp-slave-thr-taper-ua",
 			      &chip->cp_slave_thr_taper_ua);
 
@@ -1619,6 +1648,8 @@ static int smb1390_create_votables(struct smb1390 *chip)
 	if (IS_ERR(chip->slave_disable_votable))
 		return PTR_ERR(chip->slave_disable_votable);
 
+	/* Keep slave SMB disabled */
+	vote(chip->slave_disable_votable, SRC_VOTER, true, 0);
 	/*
 	 * charge pump is initially disabled; this indirectly votes to allow
 	 * traditional parallel charging if present
