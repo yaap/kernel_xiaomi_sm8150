@@ -1885,7 +1885,6 @@ static struct drm_driver msm_driver = {
 };
 
 #ifdef CONFIG_PM_SLEEP
-
 static int msm_pm_suspend(struct device *dev)
 {
 	struct drm_device *ddev;
