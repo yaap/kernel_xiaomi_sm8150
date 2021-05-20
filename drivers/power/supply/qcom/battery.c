@@ -1,5 +1,4 @@
 /* Copyright (c) 2017-2020 The Linux Foundation. All rights reserved.
- * Copyright (C) 2019 XiaoMi, Inc.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -1344,24 +1343,6 @@ static int usb_icl_vote_callback(struct votable *votable, void *data,
 
 	vote(chip->pl_disable_votable, ICL_CHANGE_VOTER, false, 0);
 
-	if (!chip->usb_psy)
-		chip->usb_psy = power_supply_get_by_name("usb");
-	if (!chip->usb_psy) {
-		pr_err("Couldn't get usb psy\n");
-		return -ENODEV;
-	}
-
-	rc = power_supply_get_property(chip->usb_psy,
-				POWER_SUPPLY_PROP_SMB_EN_REASON, &pval);
-	if (rc < 0) {
-		pr_err("Couldn't get cp reason rc=%d\n", rc);
-		return rc;
-	}
-
-	if (chip->cp_ilim_votable) {
-		vote(chip->cp_ilim_votable, ICL_CHANGE_VOTER, false, 0);
-	}
-
 	/* Configure ILIM based on AICL result only if input mode is USBMID */
 	if (cp_get_parallel_mode(chip, PARALLEL_INPUT_MODE)
 					== POWER_SUPPLY_PL_USBMID_USBMID)
@@ -1620,7 +1601,7 @@ static int pl_awake_vote_callback(struct votable *votable,
 	struct pl_data *chip = data;
 
 	if (awake)
-		__pm_wakeup_event(chip->pl_ws, 500);
+		__pm_stay_awake(chip->pl_ws);
 	else
 		__pm_relax(chip->pl_ws);
 
