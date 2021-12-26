@@ -1662,7 +1662,6 @@ static int io_submit_one(struct kioctx *ctx, struct iocb __user *user_iocb,
 	req->ki_user_iocb = user_iocb;
 	req->ki_user_data = iocb->aio_data;
 
-	get_file(file);
 	switch (iocb->aio_lio_opcode) {
 	case IOCB_CMD_PREAD:
 		ret = aio_read(&req->rw, iocb, false, compat);
@@ -1681,7 +1680,6 @@ static int io_submit_one(struct kioctx *ctx, struct iocb __user *user_iocb,
 		ret = -EINVAL;
 		break;
 	}
-	fput(file);
 
 	if (ret && ret != -EIOCBQUEUED)
 		goto out_put_req;
